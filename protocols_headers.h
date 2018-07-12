@@ -66,5 +66,41 @@ struct tcp {
     u_short th_sum;		/* checksum */
     u_short th_urp;		/* urgent pointer */
 };
+
+template<typename T>
+const T* get_tcp_payload_as(const u_char* packet) {
+
+    const protocols::ip* ip = (protocols::ip*)(packet + protocols::SIZE_ETHERNET);
+    const int size_ip = IP_HL(ip)*4;
+    const protocols::tcp* tcp = (protocols::tcp*)(packet + protocols::SIZE_ETHERNET + size_ip);
+    const int size_tcp = TH_OFF(tcp)*4;
+
+    return (T*) (packet + protocols::SIZE_ETHERNET + size_ip + size_tcp);
 }
 
+}
+
+/*
+    //const struct protocols::ethernet *ethernet;
+    const protocols::ip *ip;
+    const protocols::tcp *tcp;
+    const memcached::header_t* request;
+    int size_ip;
+    int size_tcp;
+
+    //ethernet = (protocols::ethernet*)(packet);
+    ip = (protocols::ip*)(packet + protocols::SIZE_ETHERNET);
+    size_ip = IP_HL(ip)*4;
+    if (size_ip < 20) {
+        printf("   * Invalid IP header length: %u bytes\n", size_ip);
+        return;
+    }
+    tcp = (protocols::tcp*)(packet + protocols::SIZE_ETHERNET + size_ip);
+    size_tcp = TH_OFF(tcp)*4;
+    if (size_tcp < 20) {
+        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
+        return;
+    }
+    request = (memcached::header_t*)(packet + protocols::SIZE_ETHERNET + size_ip + size_tcp);
+
+ */

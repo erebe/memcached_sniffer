@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <string_view>
 
+#include "enum.h"
+
 
 namespace memcached {
 
@@ -103,6 +105,25 @@ enum class RESPONSE_STATUS : uint16_t {
     OUT_OF_RANGE
 };
 
+BETTER_ENUM(RSP_STATUS, uint16_t,
+            No_error                              = 0x00,
+            Key_not_found                         = 0x01,
+            Key_exists                            = 0x02,
+            Value_too_large                       = 0x03,
+            Invalid_arguments                     = 0x04,
+            Item_not_stored                       = 0x05,
+            Incr_Decr_on_non_numeric_value        = 0x06,
+            The_vbucket_belongs_to_another_server = 0x07,
+            Authentication_error                  = 0x08,
+            Authentication_continue               = 0x09,
+            Unknown_command                       = 0x81,
+            Out_of_memory                         = 0x82,
+            Not_supported                         = 0x83,
+            Internal_error                        = 0x84,
+            Busy                                  = 0x85,
+            Temporary_failure                     = 0x86
+)
+
 #pragma pack(push, 1)
 struct header_t {
     MSG_TYPE magic;
@@ -185,10 +206,15 @@ template<> auto get_extra<MSG_TYPE::Request, COMMAND::GAT>(const header_t *heade
 template<> auto get_extra<MSG_TYPE::Request, COMMAND::GATQ>(const header_t *header) { return (touch_extra_t*) (header + 1); };
 }
 
+bool has_extra(const header_t& header) { return header.extras_length > 0; }
 template<MSG_TYPE T, COMMAND C>
 auto get_extra(const header_t* header) {
-    return (header->extras_length == 0) ? (no_extra_t*)(header+1)
-                                        : impl::get_extra<T, C>(header);
+    return impl::get_extra<T, C>(header);
+
+}
+
+bool has_key(const header_t* header) {
+    return (header->key_length > 0);
 }
 
 std::string_view get_key(const header_t* header) {
@@ -200,4 +226,10 @@ std::string_view get_value(const header_t* header) {
     return std::string_view((const char*) (header + 1) + offset, ntohl(header->body_length) - offset);
 }
 
+bool is_valid_header(const header_t* header) {
+
+    return ((header->magic == MSG_TYPE::Response || header->magic == MSG_TYPE::Request)
+            && header->opcode < COMMAND::OUT_OF_RANGE
+            && header->data_type == 0x00);
+}
 }

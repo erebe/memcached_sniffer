@@ -3,87 +3,110 @@
 #include <pcap.h>
 #include <netinet/in.h>
 
+#include <clipp.h>
+//#include <fmt/format.h>
+#include <spdlog/spdlog.h>
+#include <map>
+
 #include "protocols_headers.h"
 #include "memcached_protocol.h"
 
 
-void handle_packet(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet)
-{
+static auto logger = spdlog::stdout_color_mt("main");
+
+
+void filter_keys(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
+
     // Drop invalid packets
     if(packet == nullptr || header->len <= 0) return;
 
-    //const struct protocols::ethernet *ethernet;
-    const protocols::ip *ip;
-    const protocols::tcp *tcp;
-    const memcached::header_t* request;
-    int size_ip;
-    int size_tcp;
+    const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
-    //ethernet = (protocols::ethernet*)(packet);
-    ip = (protocols::ip*)(packet + protocols::SIZE_ETHERNET);
-    size_ip = IP_HL(ip)*4;
-    if (size_ip < 20) {
-        printf("   * Invalid IP header length: %u bytes\n", size_ip);
-        return;
+    // We are interested only by packets that contains memcached protocol header
+    if(!memcached::is_valid_header(request)) return;
+
+    if(memcached::has_key(request)) {
+        std::cout << memcached::get_key(request) << '\n';
     }
-    tcp = (protocols::tcp*)(packet + protocols::SIZE_ETHERNET + size_ip);
-    size_tcp = TH_OFF(tcp)*4;
-    if (size_tcp < 20) {
-        printf("   * Invalid TCP header length: %u bytes\n", size_tcp);
-        return;
-    }
-    request = (memcached::header_t*)(packet + protocols::SIZE_ETHERNET + size_ip + size_tcp);
-
-    // Filter SET Request
-    //if(request->magic != memcached::MSG_TYPE::Request || request->opcode != memcached::COMMAND::Set) return;
-    if(request->magic != memcached::MSG_TYPE::Request && request->magic != memcached::MSG_TYPE::Response) return;
-
-    //std::cout << "key_length " << ntohs(request->key_length) << '\n';
-    //std::cout << "extra_length " << ntohs(request->extras_length) << '\n';
-    std::cout << memcached::get_key(request)  << /* " value: " << /*memcached::get_value(request) <<*/ '\n';
-    //std::cout << "expiration: " << ntohl(memcached::get_extra<memcached::MSG_TYPE::Request, memcached::COMMAND::Set>(request)->expiration) << '\n';
-
-
 }
 
+void filter_errors(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
+
+    // Drop invalid packets
+    if(packet == nullptr || header->len <= 0) return;
+
+    const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
+
+    // Only response contains status code of operations
+    if(!memcached::is_valid_header(request) || request->magic != memcached::MSG_TYPE::Response) return;
+
+    uint16_t status_code = ntohs(request->rsp_status);
+    if(status_code > 0x01) {
+        better_enums::optional<memcached::RSP_STATUS> status = memcached::RSP_STATUS::_from_integral_nothrow(status_code);
+        if(status) {
+            std::cout << status->_to_string() << " : " << memcached::get_value(request) << '\n';
+        }
+    }
+}
 
 int main(int argc, char *argv[])
 {
-    pcap_t *handle;		/* Session handle */
-    char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
-    struct bpf_program fp;		/* The compiled filter */
-    bpf_u_int32 mask;		/* Our netmask */
-    bpf_u_int32 net;		/* Our IP */
+    using namespace clipp;
+    std::string interface_name;
+    int port;
+    std::string action;
+    std::map<std::string, pcap_handler> callbacks{ {"keys", filter_keys }, { "errors", filter_errors }};
 
-    /* PCAP filter that will be compiled to an eBPF filter */
-    char filter_exp[128];
-    snprintf(filter_exp, sizeof(filter_exp), "port %s and (((ip[2:2] - ((ip[0] & 0x0f) << 2)) - ((tcp[12] & 0xf0 ) >> 2)) > 0)", argv[2]);
+    const auto cli = (
+            required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
+            required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
+            required("-f", "--filter").doc("Filter memcached packets based on {key, errors, xx}") & value("filter", action)
+            ).doc("");
+
+
+    if (!parse(argc, argv, cli)) {
+        std::cerr << make_man_page(cli, argv[0]) << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    if(callbacks.count(action) <= 0) {
+        logger->error("Requested filter {} does not exist", action);
+        return EXIT_FAILURE;
+    }
+
+    std::array<char, PCAP_ERRBUF_SIZE> pcap_err{};
+    bpf_u_int32 network_mask = 0;
+    bpf_u_int32 network_ip = 0;
+
 
     /* Find the properties for the device */
-    char* dev = argv[1]; /* The device to sniff on */
-    if (pcap_lookupnet(dev, &net, &mask, errbuf) == -1) {
-        fprintf(stderr, "Couldn't get netmask for device %s: %s\n", dev, errbuf);
-        net = 0;
-        mask = 0;
+    if (pcap_lookupnet(interface_name.c_str(), &network_ip, &network_mask, pcap_err.data()) == -1) {
+        logger->error("Couldn't get netmask for device {} -- {}", interface_name, pcap_err.data());
+        return EXIT_FAILURE;
     }
+
     /* Open the session */
-    handle = pcap_open_live(dev, BUFSIZ, 0, 1000, errbuf);
+    pcap_t* handle = pcap_open_live(interface_name.c_str(), BUFSIZ, 0, 1000, pcap_err.data());
     if (handle == NULL) {
-        fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
-        return(2);
+        logger->error("Couldn't open device {} -- {}", interface_name.c_str(), pcap_err.data());
+        return EXIT_FAILURE;
     }
-    /* Compile and apply the filter */
-    if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
-        fprintf(stderr, "Couldn't parse filter %s: %s\n", filter_exp, pcap_geterr(handle));
-        return(2);
+
+    /* PCAP filter that will be compiled to an eBPF filter */
+    struct bpf_program fp{};
+    std::string pcap_filter = fmt::format("port {} and (((ip[2:2] - ((ip[0] & 0x0f) << 2)) - ((tcp[12] & 0xf0 ) >> 2)) > 0)", port);
+    if (pcap_compile(handle, &fp, pcap_filter.c_str(), 0, network_ip) == -1) {
+        logger->error("Couldn't parse filter {} -- {}", pcap_filter, pcap_geterr(handle));
+        return EXIT_FAILURE;
     }
+
     if (pcap_setfilter(handle, &fp) == -1) {
-        fprintf(stderr, "Couldn't install filter %s: %s\n", filter_exp, pcap_geterr(handle));
-        return(2);
+        logger->error("Couldn't install filter {} -- {}", pcap_filter, pcap_geterr(handle));
+        return EXIT_FAILURE;
     }
 
 
-    pcap_loop(handle, -1, handle_packet, NULL);
+    pcap_loop(handle, -1, callbacks[action], NULL);
 
 
     /* And close the session */
