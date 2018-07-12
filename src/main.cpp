@@ -14,7 +14,7 @@
 static auto logger = spdlog::stdout_color_mt("main");
 
 static std::map<std::string, size_t> counters{};
-std::function<void(std::string_view)> on_data;
+static std::function<void(std::string_view)> on_data;
 
 void filter_keys(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
@@ -104,7 +104,7 @@ int main(int argc, char *argv[])
             required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
             required("-f", "--filter").doc("Filter memcached packets based on {keys, errors, ttls, commands}") & value("filter", action),
             option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg)
-            ).doc("");
+            ).doc("Capture memcached binary protocol in order to display information regarding requests");
 
 
     if (!parse(argc, argv, cli)) {
