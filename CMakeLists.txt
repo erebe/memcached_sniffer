@@ -15,7 +15,7 @@ endif(BUILD_STATIC_BINARY)
 
 add_subdirectory(deps/fmt EXCLUDE_FROM_ALL)
 
-add_executable(memcache_sniffer main.cpp protocols_headers.h memcached_protocol.h)
+add_executable(memcache_sniffer src/main.cpp src/protocols_headers.h src/memcached_protocol.h)
 
 target_include_directories(memcache_sniffer PUBLIC
         deps/better-enums/

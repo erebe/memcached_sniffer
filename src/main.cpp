@@ -102,8 +102,8 @@ int main(int argc, char *argv[])
     const auto cli = (
             required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
             required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
-            required("-f", "--filter").doc("Filter memcached packets based on {key, errors, xx}") & value("filter", action),
-            option("-s", "--stats").doc("Display stats every x msg instead of streaming") & value("number_of_message", nb_msg)
+            required("-f", "--filter").doc("Filter memcached packets based on {keys, errors, ttls, commands}") & value("filter", action),
+            option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg)
             ).doc("");
 
 

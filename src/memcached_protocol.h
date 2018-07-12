@@ -261,10 +261,6 @@ std::string_view get_key(const header_t* header) {
     return std::string_view((const char*) (header + 1) + header->extras_length, ntohs(header->key_length));
 }
 
-std::string get_key_copy(const header_t* header) {
-    return std::string((const char*) (header + 1) + header->extras_length, ntohs(header->key_length));
-}
-
 std::string_view get_value(const header_t* header) {
     const uint32_t offset = header->extras_length + ntohs(header->key_length);
     return std::string_view((const char*) (header + 1) + offset, ntohl(header->body_length) - offset);
