@@ -84,26 +84,66 @@ enum class COMMAND : uint8_t {
     OUT_OF_RANGE
 };
 
-
-enum class RESPONSE_STATUS : uint16_t {
-    No_error                              = 0x00,
-    Key_not_found                         = 0x01,
-    Key_exists                            = 0x02,
-    Value_too_large                       = 0x03,
-    Invalid_arguments                     = 0x04,
-    Item_not_stored                       = 0x05,
-    Incr_Decr_on_non_numeric_value        = 0x06,
-    The_vbucket_belongs_to_another_server = 0x07,
-    Authentication_error                  = 0x08,
-    Authentication_continue               = 0x09,
-    Unknown_command                       = 0x81,
-    Out_of_memory                         = 0x82,
-    Not_supported                         = 0x83,
-    Internal_error                        = 0x84,
-    Busy                                  = 0x85,
-    Temporary_failure                     = 0x86,
-    OUT_OF_RANGE
-};
+BETTER_ENUM(COMMANDS, uint8_t,
+            Get                   = 0x00,
+            Set                   = 0x01,
+            Add                   = 0x02,
+            Replace               = 0x03,
+            Delete                = 0x04,
+            Increment             = 0x05,
+            Decrement             = 0x06,
+            Quit                  = 0x07,
+            Flush                 = 0x08,
+            GetQ                  = 0x09,
+            Noop                  = 0x0a,
+            Version               = 0x0b,
+            GetK                  = 0x0c,
+            GetKQ                 = 0x0d,
+            Append                = 0x0e,
+            Prepend               = 0x0f,
+            Stat                  = 0x10,
+            SetQ                  = 0x11,
+            AddQ                  = 0x12,
+            ReplaceQ              = 0x13,
+            DeleteQ               = 0x14,
+            IncrementQ            = 0x15,
+            DecrementQ            = 0x16,
+            QuitQ                 = 0x17,
+            FlushQ                = 0x18,
+            AppendQ               = 0x19,
+            PrependQ              = 0x1a,
+            Verbosity             = 0x1b,
+            Touch                 = 0x1c,
+            GAT                   = 0x1d,
+            GATQ                  = 0x1e,
+            SASL_list_mechs       = 0x20,
+            SASL_Auth             = 0x21,
+            SASL_Step             = 0x22,
+            RGet                  = 0x30,
+            RSet                  = 0x31,
+            RSetQ                 = 0x32,
+            RAppend               = 0x33,
+            RAppendQ              = 0x34,
+            RPrepend              = 0x35,
+            RPrependQ             = 0x36,
+            RDelete               = 0x37,
+            RDeleteQ              = 0x38,
+            RIncr                 = 0x39,
+            RIncrQ                = 0x3a,
+            RDecr                 = 0x3b,
+            RDecrQ                = 0x3c,
+            Set_VBucket           = 0x3d,
+            Get_VBucket           = 0x3e,
+            Del_VBucket           = 0x3f,
+            TAP_Connect           = 0x40,
+            TAP_Mutation          = 0x41,
+            TAP_Delete            = 0x42,
+            TAP_Flush             = 0x43,
+            TAP_Opaque            = 0x44,
+            TAP_VBucket_Set       = 0x45,
+            TAP_Checkpoint_Start  = 0x46,
+            TAP_Checkpoint_End    = 0x47
+)
 
 BETTER_ENUM(RSP_STATUS, uint16_t,
             No_error                              = 0x00,
@@ -221,15 +261,18 @@ std::string_view get_key(const header_t* header) {
     return std::string_view((const char*) (header + 1) + header->extras_length, ntohs(header->key_length));
 }
 
+std::string get_key_copy(const header_t* header) {
+    return std::string((const char*) (header + 1) + header->extras_length, ntohs(header->key_length));
+}
+
 std::string_view get_value(const header_t* header) {
     const uint32_t offset = header->extras_length + ntohs(header->key_length);
     return std::string_view((const char*) (header + 1) + offset, ntohl(header->body_length) - offset);
 }
 
-bool is_valid_header(const header_t* header) {
-
-    return ((header->magic == MSG_TYPE::Response || header->magic == MSG_TYPE::Request)
-            && header->opcode < COMMAND::OUT_OF_RANGE
-            && header->data_type == 0x00);
+bool is_valid_header(const header_t& header) {
+    return ((header.magic == MSG_TYPE::Response || header.magic == MSG_TYPE::Request)
+            && header.opcode < COMMAND::OUT_OF_RANGE
+            && header.data_type == 0x00);
 }
 }
