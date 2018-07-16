@@ -246,7 +246,7 @@ int forward_memcached_traffic(const std::string& interface_name, int port, size_
     pcap_t* handle = *handleOpt;
 
     std::array<uint8_t*, BUFSIZ> buf{};
-    ssize_t ix = 0;
+    size_t ix = 0;
     nb_failure = 0;
     on_msg = [&sockets, &ix, &buf, &create_new_connection, &nb_failure](const uint8_t* data, ssize_t len) {
         ssize_t send_ret = 0;
@@ -296,12 +296,15 @@ int forward_memcached_traffic(const std::string& interface_name, int port, size_
                 case -2:
                 reconnect:
                     close(sockets[ix]);
-                    for(; nb_failure <= max_failure;) {
+                    for(; nb_failure <= max_failure; nb_failure++) {
                         if(const auto sock = create_new_connection(); sock.has_value()) {
                             sockets[ix] = sock.value();
-                        } else {
-                            nb_failure++;
+                            break;
                         }
+                    }
+                    if(nb_failure >= max_failure) {
+                        logger->error("Cannot reconnect to remote memcached");
+                        throw std::runtime_error("Cannot reconnect to memcached instance");
                     }
                     break;
             }
