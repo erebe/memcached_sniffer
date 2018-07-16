@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string_view>
+#include <netinet/in.h>
 
 #include "enum.h"
 
@@ -266,9 +267,9 @@ std::string_view get_value(const header_t* header) {
     return std::string_view((const char*) (header + 1) + offset, ntohl(header->body_length) - offset);
 }
 
-bool is_valid_header(const header_t& header) {
-    return ((header.magic == MSG_TYPE::Response || header.magic == MSG_TYPE::Request)
-            && header.opcode < COMMAND::OUT_OF_RANGE
-            && header.data_type == 0x00);
+bool is_valid_header(const header_t* header) {
+    return ((header->magic == MSG_TYPE::Response || header->magic == MSG_TYPE::Request)
+            && header->opcode < COMMAND::OUT_OF_RANGE
+            && header->data_type == 0x00);
 }
 }

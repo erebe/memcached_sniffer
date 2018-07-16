@@ -32,13 +32,18 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
 
     std::vector<uint8_t>& buffer = buffers[protocols::get_cnx_id(packet)];
 
-    // We can have multiple request in one packet, so try to be greedy and iterate over all of them
+    // We can have multiple requests in one packet, so try to be greedy and iterate over all of them
     const auto payload = protocols::get_tcp_payload_as<uint8_t>(packet);
     const uint8_t* packet_last = (uint8_t*) packet + header->caplen;
     for(const uint8_t* it = payload; it < packet_last;) {
 
+        /* VALID MEMCACHED HEADER
+         * If this is a valid memcached header, there is only 2 cases
+         * either the request is small enough in order to fit in a single packet
+         * either the request is too big and we have to buffer data until we got everything
+         */
         const auto* request = (memcached::header_t*)(it);
-        if(memcached::is_valid_header(*request)) {
+        if(memcached::is_valid_header(request)) {
             // We are interested only by STORE requests
             if(!(request->magic == memcached::MSG_TYPE::Request && request->opcode == memcached::COMMAND::Set)) {
                 return;
@@ -51,7 +56,7 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
             const uint8_t* last = ((uint8_t*) (request + 1)) + request_len;
             if(last <= packet_last) {
                 // Happy path, the request is small enough to fit in a single packet
-                logger->debug("Request fit in one packet");
+                logger->debug("Request fit in 1 packet");
                 on_msg(it, sizeof(memcached::header_t) + request_len);
 
                 it = last;
@@ -60,6 +65,8 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
 
             // The memcached body does not fit in a single packet, buffer things
             logger->debug("Request too big for one packet");
+            if(!buffer.empty()) logger->error("Lost a packet");
+
             buffer.clear();
             buffer.reserve(sizeof(memcached::header_t) + request_len);
             buffer.insert(buffer.end(), it, packet_last);
@@ -67,24 +74,36 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
 
         }
 
-        /*
-         * Invalid memcached header
+        /* INVALID MEMCACHED HEADER
+         * If this is an invalid header, that means
+         * either the program is starting and we catched the packet in the middle of a request so we don't have the header
+         * either we already seen the header and we are already buffering the data
+         *
+         * P.s: Even if memcached body length match, there is still a chance that we aggregated two wrong packet so play
+         * it safe
          */
 
-        // No ongoing buffering, we are lost
+        // No ongoing buffering, we have lost the header
         if(buffer.empty()) {
-            logger->debug("We are lost");
+            logger->debug("Header lost");
             return;
         }
 
-        // We already have some data bufferized for this connection
-        // keep buffering until we got all the payload
-        const int request_len = ntohl(((memcached::header_t*) buffer.data())->body_length);
+        const uint32_t request_len = ntohl(((memcached::header_t*) buffer.data())->body_length);
         const uint8_t* last = it + (request_len - (buffer.size() - sizeof(memcached::header_t)));
 
+        // Our memcached request is still bigger than the whole packet
+        // Buffer everything
+        if(last > packet_last) {
+            logger->debug("Request buffering");
+            buffer.insert(buffer.end(), it, packet_last);
+            return;
+        }
+
+        // Packet size and remaining memcached data match
         // Possibility that's the wrong packet and that the payload match only the size (rare case ?)
         if (last == packet_last) {
-            logger->debug("Got one :)");
+            logger->debug("Request full");
             buffer.insert(buffer.end(), it, last);
             on_msg(buffer.data(), buffer.size());
             buffer.clear();
@@ -92,35 +111,36 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
         }
 
         // Happy case as we can verify that the next packet is a valid memcached header
+        // and so that we haven't screwed up too much
         if(last <= packet_last - sizeof(memcached::header_t)) {
-            // Check that we have a valid memcached header, if this is not the case we messed something up :'x
-            if(memcached::is_valid_header(*(memcached::header_t*)last)) {
-                buffer.insert(buffer.end(), it, last);
-                on_msg(buffer.data(), buffer.size());
-                buffer.clear();
 
-                it = last;
-                logger->debug("Got one :)");
-                continue;
+            // Check that we have a valid memcached header, if this is not the case we messed up something up :'x
+            if(!memcached::is_valid_header((memcached::header_t*)last)) {
+                // We messed up, start from scratch
+                logger->error("Request invalid");
+                buffer.clear();
+                return;
             }
 
-            // Not a valid header after of payload, Start from scratch
-            logger->debug("Found Invalid packet");
+            // Got a valid request as we are correctly aligned
+            buffer.insert(buffer.end(), it, last);
+            on_msg(buffer.data(), buffer.size());
             buffer.clear();
-            return;
+
+            it = last;
+            logger->debug("Request full");
+            continue;
         }
 
+        // The size don't match and we don't have enough bytes to check if the following data is a valid memcached header
+        // Play safe and start from sratch
         if(last <= packet_last) {
-            logger->debug("Can't be sure");
+            logger->debug("Request state unknown");
             buffer.clear();
             return;
         }
 
-        // Our memcached request is still bigger than this packet
-        logger->debug("Swallowed a whole packet");
-        buffer.insert(buffer.end(), it, packet_last);
-        return;
-
+        assert(false && "should not be reachable");
     }
 
 }
@@ -133,7 +153,7 @@ void filter_keys(u_char* /*args*/, const struct pcap_pkthdr* header, const u_cha
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
     // We are interested only by packets that contains memcached protocol header
-    if(!memcached::is_valid_header(*request)) return;
+    if(!memcached::is_valid_header(request)) return;
 
     if(memcached::has_key(request)) {
         on_data(memcached::get_key(request));
@@ -148,7 +168,7 @@ void filter_errors(u_char* /*args*/, const struct pcap_pkthdr* header, const u_c
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
     // Only response contains status code of operations
-    if(!memcached::is_valid_header(*request) || request->magic != memcached::MSG_TYPE::Response) return;
+    if(!memcached::is_valid_header(request) || request->magic != memcached::MSG_TYPE::Response) return;
 
     uint16_t status_code = ntohs(request->rsp_status);
     if(status_code > (uint8_t) memcached::RSP_STATUS::Key_not_found) {
@@ -167,7 +187,7 @@ void filter_commands(u_char* /*args*/, const struct pcap_pkthdr* header, const u
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
     // Only response contains status code of operations
-    if(!memcached::is_valid_header(*request)) return;
+    if(!memcached::is_valid_header(request)) return;
 
     better_enums::optional<memcached::COMMANDS> status = memcached::COMMANDS::_from_integral_nothrow(static_cast<uint8_t >(request->opcode));
     if(status) {
@@ -183,7 +203,7 @@ void filter_ttls(u_char* /*args*/, const struct pcap_pkthdr* header, const u_cha
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
     // Only response contains status code of operations
-    if(!memcached::is_valid_header(*request) || !memcached::has_extra(*request)) return;
+    if(!memcached::is_valid_header(request) || !memcached::has_extra(*request)) return;
 
     switch(request->opcode) {
         case memcached::COMMAND::Set:
