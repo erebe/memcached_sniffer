@@ -2,6 +2,9 @@
 #include <string>
 #include <pcap.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
+#include <arpa/inet.h> //inet_addr
+#include <resolv.h>
 
 #include <clipp.h>
 #include <spdlog/spdlog.h>
@@ -9,12 +12,78 @@
 
 #include "protocols_headers.h"
 #include "memcached_protocol.h"
-
+#include "socket.h"
 
 static auto logger = spdlog::stdout_color_mt("main");
 
+static std::map<uint64_t, std::vector<uint8_t>> buffers{};
 static std::map<std::string, size_t> counters{};
 static std::function<void(std::string_view)> on_data;
+static std::function<void(const std::vector<uint8_t>&)> on_msg;
+
+
+void filter_packets(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
+
+    // Drop invalid packets
+    if(packet == nullptr || header->len <= 0 || header->caplen != header->len) {
+        logger->error("Dropping packets");
+        return;
+    }
+
+    std::vector<uint8_t>& buffer = buffers[protocols::get_cnx_id(packet)];
+    if(buffer.empty()) {
+        const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
+
+        // We are interested only by packets that contains memcached protocol header
+        if(!memcached::is_valid_header(*request) || request->magic != memcached::MSG_TYPE::Request || request->opcode != memcached::COMMAND::Set) return;
+
+        // Calculate the size of the memcached request and the packet size in order
+        // to check if the payload fit in a single packet or if we should buffer things
+        // until we get everything
+        uint32_t len = ntohl(request->body_length);
+        uint8_t* last = ((uint8_t*) (request + 1)) + len;
+        uint8_t* packet_last = (uint8_t*) packet + header->len;
+        if(last <= packet_last) {
+            // Happy path, the request is small enough to fit in a single packet
+            logger->debug("Request fit in one packet");
+            buffer.reserve(sizeof(memcached::header_t) + len);
+            buffer.insert(buffer.end(), (uint8_t*) request, last);
+            on_msg(buffer);
+            buffer.clear();
+            return;
+        }
+
+        // The memcached body does not fit in a single packet, buffer things
+        logger->debug("Request too big for one packet");
+        buffer.reserve(sizeof(memcached::header_t) + len);
+        buffer.insert(buffer.end(), (uint8_t*) request, packet_last);
+        return;
+
+    }
+
+    // We already have some data bufferized for this connection
+    // keep buffering until we got all the payload
+    const uint8_t* payload = protocols::get_tcp_payload_as<uint8_t>(packet);
+    const uint8_t* payload_end = (uint8_t*) packet + header->len;
+    buffer.insert(buffer.end(), payload, payload_end);
+
+    const int request_len = sizeof(memcached::header_t) + ntohl(((memcached::header_t*) buffer.data())->body_length);
+    if(buffer.size() < request_len) {
+        //logger->info("Buffering request");
+    } else if(buffer.size() == request_len) {
+        logger->debug("Request full");
+        on_msg(buffer);
+        buffer.clear();
+    } else if (request_len + sizeof(memcached::header_t) <= buffer.size()
+               && memcached::is_valid_header(*((memcached::header_t*) &buffer[request_len]))){
+        buffer.resize(request_len);
+        on_msg(buffer);
+        buffer.clear();
+    } else {
+        logger->debug("Invalid request size");
+        buffer.clear();
+    }
+}
 
 void filter_keys(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
@@ -96,8 +165,9 @@ int main(int argc, char *argv[])
     std::map<std::string, pcap_handler> callbacks{ { "keys", filter_keys },
                                                    { "errors", filter_errors },
                                                    { "commands", filter_commands },
-                                                   { "ttls", filter_ttls }
-                                                   };
+                                                   { "ttls", filter_ttls },
+                                                   { "packets", filter_packets }
+                                                  };
 
     const auto cli = (
             required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
@@ -121,7 +191,6 @@ int main(int argc, char *argv[])
     bpf_u_int32 network_mask = 0;
     bpf_u_int32 network_ip = 0;
 
-
     /* Find the properties for the device */
     if (pcap_lookupnet(interface_name.c_str(), &network_ip, &network_mask, pcap_err.data()) == -1) {
         logger->error("Couldn't get netmask for device {} -- {}", interface_name, pcap_err.data());
@@ -129,7 +198,7 @@ int main(int argc, char *argv[])
     }
 
     /* Open the session */
-    pcap_t* handle = pcap_open_live(interface_name.c_str(), BUFSIZ, 0, 1000, pcap_err.data());
+    pcap_t* handle = pcap_open_live(interface_name.c_str(), 0, 0, 1000, pcap_err.data());
     if (handle == NULL) {
         logger->error("Couldn't open device {} -- {}", interface_name.c_str(), pcap_err.data());
         return EXIT_FAILURE;
@@ -148,6 +217,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+//    pcap_t* handle = pcap_open_offline("dump.pcap", pcap_err.data());
+
     if(nb_msg > 0) {
         on_data = [](std::string_view data) {
             counters[std::string(data)]++;
@@ -158,7 +229,72 @@ int main(int argc, char *argv[])
         };
     }
 
-    pcap_loop(handle, nb_msg, callbacks[action], NULL);
+    std::array<int, 200> sockets{};
+    for(int i = 0; i < sockets.size();) {
+        if(const auto sock = cnx::connect_to("192.168.18.18", 11221); sock.has_value()) {
+            sockets[i] = sock.value();
+            i++;
+        }
+    }
+
+    std::array<uint8_t*, BUFSIZ> buf;
+    int ix = 0;
+    on_msg = [&sockets, &ix, &buf](const std::vector<uint8_t>& data) {
+        ssize_t send_ret = 0;
+        ssize_t offset = 0;
+
+        for(;;) {
+            send_ret = send(sockets[ix], data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
+            switch(send_ret) {
+
+            case -1:
+                // Sadly it brokes :'(
+                // Close the cnx and create an other one as the current state of the transfert is unkown
+                if(!(errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    logger->error("error during send on socket {} {}/{} -- {}", sockets[ix], offset, data.size(), strerror(errno));
+                    goto reconnect;
+                }
+
+                // Socket full cannot send more data on it
+                // Just load balance on an other cnx
+                if(offset == 0) {
+                    ix = (ix + 1) % sockets.size();
+                    break;
+                }
+
+                // Pending data to be send, we have to wait ...
+                break;
+
+
+            default:
+                offset += send_ret;
+                // We sent data partially, we have to send the remainning
+                // on the same socket, so just retry
+                if(offset < data.size()) {
+                    break;
+                }
+
+                // Sent too much data, should not be possible
+                if (offset > data.size()) {
+                    logger->error("Sent to much data to the memcache");
+                    goto reconnect;
+                }
+
+                // Everything is sent :)
+                ix = (ix + 1) % sockets.size();
+                return;
+
+            case -2:
+            reconnect:
+                close(sockets[ix]);
+                sockets[ix] = *cnx::connect_to("192.168.18.18", 11221);
+                break;
+            }
+
+        }
+    };
+
+    pcap_loop(handle, nb_msg, callbacks[action], nullptr);
     for(const auto& kv: counters) {
         std::cout << kv.first << " : " << kv.second << '\n';
     }

@@ -225,25 +225,25 @@ namespace impl {
 template<MSG_TYPE T, COMMAND C>
 auto get_extra(const header_t* header) { return (no_extra_t*)(header+1);}
 
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Set>(const header_t *header) { return (set_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Add>(const header_t *header) { return (set_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Replace>(const header_t *header) { return (set_extra_t*) (header + 1); };
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Set>(const header_t *header) { return (set_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Add>(const header_t *header) { return (set_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Replace>(const header_t *header) { return (set_extra_t*) (header + 1); }
 
-template<> auto get_extra<MSG_TYPE::Response, COMMAND::Get>(const header_t *header) { return (get_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Response, COMMAND::GetQ>(const header_t *header) { return (get_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Response, COMMAND::GetK>(const header_t *header) { return (get_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Response, COMMAND::GetKQ>(const header_t *header) { return (get_extra_t*) (header + 1); };
+template<> auto get_extra<MSG_TYPE::Response, COMMAND::Get>(const header_t *header) { return (get_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Response, COMMAND::GetQ>(const header_t *header) { return (get_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Response, COMMAND::GetK>(const header_t *header) { return (get_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Response, COMMAND::GetKQ>(const header_t *header) { return (get_extra_t*) (header + 1); }
 
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Increment>(const header_t *header) { return (inc_dec_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Decrement>(const header_t *header) { return (inc_dec_extra_t*) (header + 1); };
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Increment>(const header_t *header) { return (inc_dec_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Decrement>(const header_t *header) { return (inc_dec_extra_t*) (header + 1); }
 
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Flush>(const header_t *header) { return (flush_extra_t*) (header + 1); };
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Flush>(const header_t *header) { return (flush_extra_t*) (header + 1); }
 
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Verbosity>(const header_t *header) { return (verbosity_extra_t*) (header + 1); };
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Verbosity>(const header_t *header) { return (verbosity_extra_t*) (header + 1); }
 
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::Touch>(const header_t *header) { return (touch_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::GAT>(const header_t *header) { return (touch_extra_t*) (header + 1); };
-template<> auto get_extra<MSG_TYPE::Request, COMMAND::GATQ>(const header_t *header) { return (touch_extra_t*) (header + 1); };
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::Touch>(const header_t *header) { return (touch_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::GAT>(const header_t *header) { return (touch_extra_t*) (header + 1); }
+template<> auto get_extra<MSG_TYPE::Request, COMMAND::GATQ>(const header_t *header) { return (touch_extra_t*) (header + 1); }
 }
 
 bool has_extra(const header_t& header) { return header.extras_length > 0; }

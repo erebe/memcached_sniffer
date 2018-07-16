@@ -78,6 +78,13 @@ const T* get_tcp_payload_as(const u_char* packet) {
     return (T*) (packet + protocols::SIZE_ETHERNET + size_ip + size_tcp);
 }
 
+uint64_t get_cnx_id(const u_char* packet) {
+    const protocols::ip* ip = (protocols::ip*)(packet + protocols::SIZE_ETHERNET);
+    const protocols::tcp* tcp = (protocols::tcp*)(packet + protocols::SIZE_ETHERNET + (IP_HL(ip)*4));
+
+    return (((uint64_t) ip->ip_src.s_addr) << 32) + tcp->th_sport;
+}
+
 }
 
 /*
