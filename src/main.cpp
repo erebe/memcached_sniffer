@@ -25,7 +25,7 @@ static std::function<void(const std::vector<uint8_t>&)> on_msg;
 void filter_packets(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
-    if(packet == nullptr || header->len <= 0 || header->caplen != header->len) {
+    if(packet == nullptr || header->caplen < sizeof(memcached::header_t) || header->caplen != header->len) {
         logger->error("Dropping packets");
         return;
     }
@@ -88,7 +88,7 @@ void filter_packets(u_char* /*args*/, const struct pcap_pkthdr* header, const u_
 void filter_keys(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
-    if(packet == nullptr || header->len <= 0) return;
+    if(packet == nullptr || header->caplen < sizeof(memcached::header_t)) return;
 
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
@@ -103,7 +103,7 @@ void filter_keys(u_char* /*args*/, const struct pcap_pkthdr* header, const u_cha
 void filter_errors(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
-    if(packet == nullptr || header->len <= 0) return;
+    if(packet == nullptr || header->caplen < sizeof(memcached::header_t)) return;
 
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
@@ -122,7 +122,7 @@ void filter_errors(u_char* /*args*/, const struct pcap_pkthdr* header, const u_c
 void filter_commands(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
-    if(packet == nullptr || header->len <= 0) return;
+    if(packet == nullptr || header->caplen < sizeof(memcached::header_t)) return;
 
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
@@ -135,7 +135,7 @@ void filter_commands(u_char* /*args*/, const struct pcap_pkthdr* header, const u
 void filter_ttls(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
-    if(packet == nullptr || header->len <= 0) return;
+    if(packet == nullptr || header->caplen < sizeof(memcached::header_t)) return;
 
     const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
@@ -158,10 +158,15 @@ void filter_ttls(u_char* /*args*/, const struct pcap_pkthdr* header, const u_cha
 int main(int argc, char *argv[])
 {
     using namespace clipp;
+
+    enum class mode {sniff, forward, help};
+    mode selected = mode::help;
+
     std::string interface_name;
     int port;
     std::string action;
     size_t nb_msg = 0;
+    std::string destination;
     std::map<std::string, pcap_handler> callbacks{ { "keys", filter_keys },
                                                    { "errors", filter_errors },
                                                    { "commands", filter_commands },
@@ -169,16 +174,31 @@ int main(int argc, char *argv[])
                                                    { "packets", filter_packets }
                                                   };
 
-    const auto cli = (
+    const auto sniffMode = (
+            command("sniff").set(selected, mode::sniff),
             required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
             required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
             required("-f", "--filter").doc("Filter memcached packets based on {keys, errors, ttls, commands}") & value("filter", action),
             option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg)
-            ).doc("Capture memcached binary protocol in order to display information regarding requests");
+            );
 
+    const auto forward = (
+            command("forward").set(selected, mode::forward),
+            required("-i", "--interface").doc("interface name to sniff packets on") & value("interface_name", interface_name),
+            required("-p", "--port").doc("port on which memcached instance is listening") & value("port", port),
+            required("-d", "--destination").doc("Remote memcached that will receive the SETs requests") & value("remote_memcached", destination)
+            );
 
-    if (!parse(argc, argv, cli)) {
-        std::cerr << make_man_page(cli, argv[0]) << std::endl;
+    const auto cli = (sniffMode | forward | command("help").set(selected, mode::help));
+
+    if(parse(argc, argv, cli)) {
+        switch(selected) {
+            case mode::sniff: /* ... */ break;
+            case mode::forward: /* ... */ break;
+            case mode::help: std::cout << make_man_page(cli, "memcache_sniffer"); break;
+        }
+    } else {
+        std::cout << make_man_page(cli, "memcache_sniffer");
         return EXIT_FAILURE;
     }
 
