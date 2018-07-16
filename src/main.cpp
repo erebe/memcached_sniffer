@@ -19,7 +19,7 @@ static auto logger = spdlog::stdout_color_mt("main");
 
 static std::map<uint64_t, std::vector<uint8_t>> buffers{};
 static std::function<void(std::string_view)> on_data;
-static std::function<void(const std::vector<uint8_t>&)> on_msg;
+static std::function<void(const uint8_t*, ssize_t len)> on_msg;
 
 
 void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
@@ -31,58 +31,98 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
     }
 
     std::vector<uint8_t>& buffer = buffers[protocols::get_cnx_id(packet)];
-    if(buffer.empty()) {
-        const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
 
-        // We are interested only by packets that contains memcached protocol header
-        if(!memcached::is_valid_header(*request) || request->magic != memcached::MSG_TYPE::Request || request->opcode != memcached::COMMAND::Set) return;
+    // We can have multiple request in one packet, so try to be greedy and iterate over all of them
+    const auto payload = protocols::get_tcp_payload_as<uint8_t>(packet);
+    const uint8_t* packet_last = (uint8_t*) packet + header->caplen;
+    for(const uint8_t* it = payload; it < packet_last;) {
 
-        // Calculate the size of the memcached request and the packet size in order
-        // to check if the payload fit in a single packet or if we should buffer things
-        // until we get everything
-        const uint32_t len = ntohl(request->body_length);
-        const uint8_t* last = ((uint8_t*) (request + 1)) + len;
-        const uint8_t* packet_last = (uint8_t*) packet + header->len;
-        if(last <= packet_last) {
-            // Happy path, the request is small enough to fit in a single packet
-            logger->debug("Request fit in one packet");
-            buffer.reserve(sizeof(memcached::header_t) + len);
-            buffer.insert(buffer.end(), (const uint8_t*) request, last);
-            on_msg(buffer);
+        const auto* request = (memcached::header_t*)(it);
+        if(memcached::is_valid_header(*request)) {
+            // We are interested only by STORE requests
+            if(!(request->magic == memcached::MSG_TYPE::Request && request->opcode == memcached::COMMAND::Set)) {
+                return;
+            }
+
+            // Calculate the size of the memcached request and the packet size in order
+            // to check if the payload fit in a single packet or if we should buffer things
+            // until we get everything
+            const uint32_t request_len = ntohl(request->body_length);
+            const uint8_t* last = ((uint8_t*) (request + 1)) + request_len;
+            if(last <= packet_last) {
+                // Happy path, the request is small enough to fit in a single packet
+                logger->debug("Request fit in one packet");
+                on_msg(it, sizeof(memcached::header_t) + request_len);
+
+                it = last;
+                continue;
+            }
+
+            // The memcached body does not fit in a single packet, buffer things
+            logger->debug("Request too big for one packet");
+            buffer.clear();
+            buffer.reserve(sizeof(memcached::header_t) + request_len);
+            buffer.insert(buffer.end(), it, packet_last);
+            return;
+
+        }
+
+        /*
+         * Invalid memcached header
+         */
+
+        // No ongoing buffering, we are lost
+        if(buffer.empty()) {
+            logger->debug("We are lost");
+            return;
+        }
+
+        // We already have some data bufferized for this connection
+        // keep buffering until we got all the payload
+        const int request_len = ntohl(((memcached::header_t*) buffer.data())->body_length);
+        const uint8_t* last = it + (request_len - (buffer.size() - sizeof(memcached::header_t)));
+
+        // Possibility that's the wrong packet and that the payload match only the size (rare case ?)
+        if (last == packet_last) {
+            logger->debug("Got one :)");
+            buffer.insert(buffer.end(), it, last);
+            on_msg(buffer.data(), buffer.size());
             buffer.clear();
             return;
         }
 
-        // The memcached body does not fit in a single packet, buffer things
-        logger->debug("Request too big for one packet");
-        buffer.reserve(sizeof(memcached::header_t) + len);
-        buffer.insert(buffer.end(), (const uint8_t*) request, packet_last);
+        // Happy case as we can verify that the next packet is a valid memcached header
+        if(last <= packet_last - sizeof(memcached::header_t)) {
+            // Check that we have a valid memcached header, if this is not the case we messed something up :'x
+            if(memcached::is_valid_header(*(memcached::header_t*)last)) {
+                buffer.insert(buffer.end(), it, last);
+                on_msg(buffer.data(), buffer.size());
+                buffer.clear();
+
+                it = last;
+                logger->debug("Got one :)");
+                continue;
+            }
+
+            // Not a valid header after of payload, Start from scratch
+            logger->debug("Found Invalid packet");
+            buffer.clear();
+            return;
+        }
+
+        if(last <= packet_last) {
+            logger->debug("Can't be sure");
+            buffer.clear();
+            return;
+        }
+
+        // Our memcached request is still bigger than this packet
+        logger->debug("Swallowed a whole packet");
+        buffer.insert(buffer.end(), it, packet_last);
         return;
 
     }
 
-    // We already have some data bufferized for this connection
-    // keep buffering until we got all the payload
-    const uint8_t* payload = protocols::get_tcp_payload_as<uint8_t>(packet);
-    const uint8_t* payload_end = (uint8_t*) packet + header->len;
-    buffer.insert(buffer.end(), payload, payload_end);
-
-    const int request_len = sizeof(memcached::header_t) + ntohl(((memcached::header_t*) buffer.data())->body_length);
-    if(buffer.size() < request_len) {
-        //logger->info("Buffering request");
-    } else if(buffer.size() == request_len) {
-        logger->debug("Request full");
-        on_msg(buffer);
-        buffer.clear();
-    } else if (request_len + sizeof(memcached::header_t) <= buffer.size()
-               && memcached::is_valid_header(*((memcached::header_t*) &buffer[request_len]))){
-        buffer.resize(request_len);
-        on_msg(buffer);
-        buffer.clear();
-    } else {
-        logger->debug("Invalid request size");
-        buffer.clear();
-    }
 }
 
 void filter_keys(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
@@ -188,19 +228,19 @@ int forward_memcached_traffic(const std::string& interface_name, int port, size_
     std::array<uint8_t*, BUFSIZ> buf{};
     ssize_t ix = 0;
     nb_failure = 0;
-    on_msg = [&sockets, &ix, &buf, &create_new_connection, &nb_failure](const std::vector<uint8_t>& data) {
+    on_msg = [&sockets, &ix, &buf, &create_new_connection, &nb_failure](const uint8_t* data, ssize_t len) {
         ssize_t send_ret = 0;
         ssize_t offset = 0;
 
         for(;;) {
-            send_ret = send(sockets[ix], data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
+            send_ret = send(sockets[ix], data + offset, len - offset, MSG_NOSIGNAL);
             switch(send_ret) {
 
                 case -1:
                     // Sadly it brokes :'(
                     // Close the cnx and create an other one as the current state of the transfert is unkown
                     if(!(errno == EAGAIN || errno == EWOULDBLOCK)) {
-                        logger->error("error during send on socket {} {}/{} -- {}", sockets[ix], offset, data.size(), strerror(errno));
+                        logger->error("error during send on socket {} {}/{} -- {}", sockets[ix], offset, len, strerror(errno));
                         goto reconnect;
                     }
 
@@ -219,12 +259,12 @@ int forward_memcached_traffic(const std::string& interface_name, int port, size_
                     offset += send_ret;
                     // We sent data partially, we have to send the remainning
                     // on the same socket, so just retry
-                    if(offset < data.size()) {
+                    if(offset < len) {
                         break;
                     }
 
                     // Sent too much data, should not be possible
-                    if (offset > data.size()) {
+                    if (offset > len) {
                         logger->error("Sent to much data to the memcache");
                         goto reconnect;
                     }
@@ -288,6 +328,7 @@ int main(int argc, char *argv[]){
 
     enum class mode {sniff, forward, help};
     mode selected = mode::help;
+    bool verbose = false;
 
     std::string memcached_hostname;
     int memcached_port;
@@ -310,7 +351,8 @@ int main(int argc, char *argv[]){
             required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
             required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
             required("-f", "--filter").doc("Filter memcached packets based on {key, error, ttl, command}") & value("filter", filter),
-            option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg)
+            option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg),
+            option("-v", "--verbose").doc("verbose mode").set(verbose)
             );
 
     const auto forward = (
@@ -318,7 +360,8 @@ int main(int argc, char *argv[]){
             required("-i", "--interface").doc("interface name to sniff packets on") & value("interface_name", interface_name),
             required("-p", "--port").doc("port on which memcached instance is listening") & value("port", port),
             required("-d", "--destination").doc("Remote memcached that will receive the SETs requests") & value("remote_memcached:port", destination),
-            option("-n", "--connections").doc("Number of remote connections to open") & value("number_connection", memcached_nb_cnx)
+            option("-n", "--connections").doc("Number of remote connections to open") & value("number_connection", memcached_nb_cnx),
+            option("-v", "--verbose").doc("verbose mode").set(verbose)
             );
 
     const auto cli = (sniffMode | forward | command("help").set(selected, mode::help));
@@ -326,6 +369,10 @@ int main(int argc, char *argv[]){
     if(!parse(argc, argv, cli)) {
         std::cout << make_man_page(cli, "memcache_sniffer");
         return EXIT_FAILURE;
+    }
+
+    if(verbose) {
+            spdlog::set_level(spdlog::level::debug);
     }
 
     switch(selected) {
@@ -354,7 +401,4 @@ int main(int argc, char *argv[]){
             return EXIT_SUCCESS;
     }
 
-
-
-    return(0);
 }

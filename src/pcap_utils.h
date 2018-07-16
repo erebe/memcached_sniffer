@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iostream>
+#include <optional>
 #include <string>
 #include <pcap.h>
 #include <netinet/in.h>
