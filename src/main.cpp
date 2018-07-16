@@ -18,12 +18,11 @@
 static auto logger = spdlog::stdout_color_mt("main");
 
 static std::map<uint64_t, std::vector<uint8_t>> buffers{};
-static std::map<std::string, size_t> counters{};
 static std::function<void(std::string_view)> on_data;
 static std::function<void(const std::vector<uint8_t>&)> on_msg;
 
 
-void filter_packets(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
+void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
     if(packet == nullptr || header->caplen < sizeof(memcached::header_t) || header->caplen != header->len) {
@@ -159,58 +158,109 @@ void filter_ttls(u_char* /*args*/, const struct pcap_pkthdr* header, const u_cha
 
 }
 
-int main(int argc, char *argv[])
-{
-    using namespace clipp;
+int forward_memcached_traffic(const std::string& interface_name, int port, size_t nb_remote_cnx, const std::function<std::optional<int>()>& create_new_connection) {
 
-    enum class mode {sniff, forward, help};
-    mode selected = mode::help;
-
-    std::string interface_name;
-    int port;
-    std::string filter;
-    size_t nb_msg = 0;
-    std::string destination;
-    std::map<std::string, pcap_handler> callbacks{ { "key", filter_keys },
-                                                   { "error", filter_errors },
-                                                   { "command", filter_commands },
-                                                   { "ttl", filter_ttls },
-                                                   { "msg", filter_packets }
-                                                  };
-
-    const auto sniffMode = (
-            command("sniff").set(selected, mode::sniff),
-            required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
-            required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
-            required("-f", "--filter").doc("Filter memcached packets based on {keys, errors, ttls, commands}") & value("filter", filter),
-            option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg)
-            );
-
-    const auto forward = (
-            command("forward").set(selected, mode::forward),
-            required("-i", "--interface").doc("interface name to sniff packets on") & value("interface_name", interface_name),
-            required("-p", "--port").doc("port on which memcached instance is listening") & value("port", port),
-            required("-d", "--destination").doc("Remote memcached that will receive the SETs requests") & value("remote_memcached", destination)
-            );
-
-    const auto cli = (sniffMode | forward | command("help").set(selected, mode::help));
-
-    if(parse(argc, argv, cli)) {
-        switch(selected) {
-            case mode::sniff:
-                if(callbacks.count(filter) <= 0) {
-                    logger->error("Requested filter {} does not exist", filter);
-                    return EXIT_FAILURE;
-                }
-            break;
-
-            case mode::forward: /* ... */ break;
-            case mode::help: std::cout << make_man_page(cli, "memcache_sniffer"); break;
+    int nb_failure = 0;
+    const int max_failure = 3;
+    std::vector<int> sockets(nb_remote_cnx);
+    for(int i = 0; i < sockets.size() && nb_failure <= max_failure;) {
+        if(const auto sock = create_new_connection(); sock.has_value()) {
+            sockets[i] = sock.value();
+            i++;
+        } else {
+            nb_failure++;
         }
-    } else {
-        std::cout << make_man_page(cli, "memcache_sniffer");
+    }
+
+    if(nb_failure >= max_failure) {
+        logger->error("Impossible to create the remote connexion");
         return EXIT_FAILURE;
     }
+
+    // Filter only packets directed toward a specific port and that has an TCP payload
+    std::string pcap_filter = fmt::format("dst port {} and (((ip[2:2] - ((ip[0] & 0x0f) << 2)) - ((tcp[12] & 0xf0 ) >> 2)) > 0)", port);
+    std::optional<pcap_t*> handleOpt = pcap_utils::start_live_capture(interface_name, port, pcap_filter);
+//    pcap_t* handle = pcap_open_offline("dump.pcap", pcap_err.data());
+
+    if(!handleOpt) return EXIT_FAILURE;
+    pcap_t* handle = *handleOpt;
+
+    std::array<uint8_t*, BUFSIZ> buf{};
+    ssize_t ix = 0;
+    nb_failure = 0;
+    on_msg = [&sockets, &ix, &buf, &create_new_connection, &nb_failure](const std::vector<uint8_t>& data) {
+        ssize_t send_ret = 0;
+        ssize_t offset = 0;
+
+        for(;;) {
+            send_ret = send(sockets[ix], data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
+            switch(send_ret) {
+
+                case -1:
+                    // Sadly it brokes :'(
+                    // Close the cnx and create an other one as the current state of the transfert is unkown
+                    if(!(errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        logger->error("error during send on socket {} {}/{} -- {}", sockets[ix], offset, data.size(), strerror(errno));
+                        goto reconnect;
+                    }
+
+                    // Socket full cannot send more data on it
+                    // Just load balance on an other cnx
+                    if(offset == 0) {
+                        ix = (ix + 1) % sockets.size();
+                        break;
+                    }
+
+                    // Pending data to be send, we have to wait ...
+                    break;
+
+
+                default:
+                    offset += send_ret;
+                    // We sent data partially, we have to send the remainning
+                    // on the same socket, so just retry
+                    if(offset < data.size()) {
+                        break;
+                    }
+
+                    // Sent too much data, should not be possible
+                    if (offset > data.size()) {
+                        logger->error("Sent to much data to the memcache");
+                        goto reconnect;
+                    }
+
+                    // Everything is sent :)
+                    ix = (ix + 1) % sockets.size();
+                    return;
+
+                case -2:
+                reconnect:
+                    close(sockets[ix]);
+                    for(; nb_failure <= max_failure;) {
+                        if(const auto sock = create_new_connection(); sock.has_value()) {
+                            sockets[ix] = sock.value();
+                        } else {
+                            nb_failure++;
+                        }
+                    }
+                    break;
+            }
+
+        }
+    };
+
+    pcap_loop(handle, 0, filter_requests, nullptr);
+    pcap_close(handle);
+    return EXIT_SUCCESS;
+}
+
+int sniff_memcached_traffic(const std::string& interface_name, int port, const pcap_handler& handler, int packet_limit) {
+
+    // Basically aggregate results or stream them to stdout
+    std::map<std::string, size_t> counters{};
+    on_data = (packet_limit > 0)
+              ? on_data = [&counters](std::string_view data) { counters[std::string(data)]++; }
+              : on_data = [](std::string_view data) { std::cout << data << '\n'; };
 
 
     // Filter only packets directed toward a specific port and that has an TCP payload
@@ -222,89 +272,90 @@ int main(int argc, char *argv[])
 
     pcap_t* handle = *handleOpt;
 
-
-    if(nb_msg > 0) {
-        on_data = [](std::string_view data) {
-            counters[std::string(data)]++;
-        };
-    } else {
-        on_data = [](std::string_view data) {
-            std::cout << data << '\n';
-        };
-    }
-
-    std::array<int, 200> sockets{};
-    for(int i = 0; i < sockets.size();) {
-        if(const auto sock = cnx::connect_to("localhost", 11221); sock.has_value()) {
-            sockets[i] = sock.value();
-            i++;
-        }
-    }
-
-    std::array<uint8_t*, BUFSIZ> buf;
-    int ix = 0;
-    on_msg = [&sockets, &ix, &buf](const std::vector<uint8_t>& data) {
-        ssize_t send_ret = 0;
-        ssize_t offset = 0;
-
-        for(;;) {
-            send_ret = send(sockets[ix], data.data() + offset, data.size() - offset, MSG_NOSIGNAL);
-            switch(send_ret) {
-
-            case -1:
-                // Sadly it brokes :'(
-                // Close the cnx and create an other one as the current state of the transfert is unkown
-                if(!(errno == EAGAIN || errno == EWOULDBLOCK)) {
-                    logger->error("error during send on socket {} {}/{} -- {}", sockets[ix], offset, data.size(), strerror(errno));
-                    goto reconnect;
-                }
-
-                // Socket full cannot send more data on it
-                // Just load balance on an other cnx
-                if(offset == 0) {
-                    ix = (ix + 1) % sockets.size();
-                    break;
-                }
-
-                // Pending data to be send, we have to wait ...
-                break;
-
-
-            default:
-                offset += send_ret;
-                // We sent data partially, we have to send the remainning
-                // on the same socket, so just retry
-                if(offset < data.size()) {
-                    break;
-                }
-
-                // Sent too much data, should not be possible
-                if (offset > data.size()) {
-                    logger->error("Sent to much data to the memcache");
-                    goto reconnect;
-                }
-
-                // Everything is sent :)
-                ix = (ix + 1) % sockets.size();
-                return;
-
-            case -2:
-            reconnect:
-                close(sockets[ix]);
-                sockets[ix] = *cnx::connect_to("192.168.18.18", 11221);
-                break;
-            }
-
-        }
-    };
-
-    pcap_loop(handle, nb_msg, callbacks[filter], nullptr);
+    pcap_loop(handle, packet_limit, handler, nullptr);
     for(const auto& kv: counters) {
         std::cout << kv.first << " : " << kv.second << '\n';
     }
 
-
     /* And close the session */
     pcap_close(handle);
+
+    return EXIT_SUCCESS;
+}
+
+int main(int argc, char *argv[])
+{
+    using namespace clipp;
+
+    enum class mode {sniff, forward, help};
+    mode selected = mode::help;
+
+    std::string memcached_hostname;
+    int memcached_port;
+    size_t memcached_nb_cnx = 200;
+    size_t len;
+
+    std::string interface_name;
+    int port;
+    std::string filter;
+    int nb_msg = 0;
+    std::string destination;
+    std::map<std::string, pcap_handler> callbacks{ { "key", filter_keys },
+                                                   { "error", filter_errors },
+                                                   { "command", filter_commands },
+                                                   { "ttl", filter_ttls },
+                                                  };
+
+    const auto sniffMode = (
+            command("sniff").set(selected, mode::sniff),
+            required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
+            required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
+            required("-f", "--filter").doc("Filter memcached packets based on {key, error, ttl, command}") & value("filter", filter),
+            option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg)
+            );
+
+    const auto forward = (
+            command("forward").set(selected, mode::forward),
+            required("-i", "--interface").doc("interface name to sniff packets on") & value("interface_name", interface_name),
+            required("-p", "--port").doc("port on which memcached instance is listening") & value("port", port),
+            required("-d", "--destination").doc("Remote memcached that will receive the SETs requests") & value("remote_memcached:port", destination),
+            option("-n", "--connections").doc("Number of remote connections to open") & value("number_connection", memcached_nb_cnx)
+            );
+
+    const auto cli = (sniffMode | forward | command("help").set(selected, mode::help));
+
+    if(!parse(argc, argv, cli)) {
+        std::cout << make_man_page(cli, "memcache_sniffer");
+        return EXIT_FAILURE;
+    }
+
+    switch(selected) {
+        case mode::sniff:
+            if(callbacks.count(filter) <= 0) {
+                logger->error("Requested filter {} does not exist", filter);
+                return EXIT_FAILURE;
+            }
+
+            return sniff_memcached_traffic(interface_name, port, callbacks[filter], nb_msg);
+
+        case mode::forward:
+            len = destination.find(':');
+            if(len >= destination.size() - 1) {
+                logger->error("Invalid memcached remote destination {}. Should respect `hostname:port` format", destination);
+                return EXIT_FAILURE;
+            }
+            memcached_hostname = destination.substr(0, len);
+            memcached_port = std::stoi(destination.substr(len+1, destination.size() - len + 1));
+            return forward_memcached_traffic(interface_name, port, memcached_nb_cnx, [&memcached_hostname, &memcached_port](){
+                return cnx::connect_to(memcached_hostname, memcached_port);
+            });
+
+        case mode::help:
+            std::cout << make_man_page(cli, "memcache_sniffer");
+            return EXIT_SUCCESS;
+    }
+
+
+
     return(0);
 }
