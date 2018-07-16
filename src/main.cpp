@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 #include <map>
 
+#include "pcap_utils.h"
 #include "protocols_headers.h"
 #include "memcached_protocol.h"
 #include "socket.h"
@@ -111,7 +112,7 @@ void filter_errors(u_char* /*args*/, const struct pcap_pkthdr* header, const u_c
     if(!memcached::is_valid_header(*request) || request->magic != memcached::MSG_TYPE::Response) return;
 
     uint16_t status_code = ntohs(request->rsp_status);
-    if(status_code > 0x01) {
+    if(status_code > (uint8_t) memcached::RSP_STATUS::Key_not_found) {
         better_enums::optional<memcached::RSP_STATUS> status = memcached::RSP_STATUS::_from_integral_nothrow(status_code);
         if(status) {
             on_data(fmt::format("{} : {}", status->_to_string(), memcached::get_value(request)));
@@ -129,7 +130,10 @@ void filter_commands(u_char* /*args*/, const struct pcap_pkthdr* header, const u
     // Only response contains status code of operations
     if(!memcached::is_valid_header(*request)) return;
 
-    on_data(memcached::COMMANDS::_from_integral(static_cast<uint8_t>(request->opcode))._to_string());
+    better_enums::optional<memcached::COMMANDS> status = memcached::COMMANDS::_from_integral_nothrow(static_cast<uint8_t >(request->opcode));
+    if(status) {
+        on_data(status->_to_string());
+    }
 }
 
 void filter_ttls(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
@@ -164,21 +168,21 @@ int main(int argc, char *argv[])
 
     std::string interface_name;
     int port;
-    std::string action;
+    std::string filter;
     size_t nb_msg = 0;
     std::string destination;
-    std::map<std::string, pcap_handler> callbacks{ { "keys", filter_keys },
-                                                   { "errors", filter_errors },
-                                                   { "commands", filter_commands },
-                                                   { "ttls", filter_ttls },
-                                                   { "packets", filter_packets }
+    std::map<std::string, pcap_handler> callbacks{ { "key", filter_keys },
+                                                   { "error", filter_errors },
+                                                   { "command", filter_commands },
+                                                   { "ttl", filter_ttls },
+                                                   { "msg", filter_packets }
                                                   };
 
     const auto sniffMode = (
             command("sniff").set(selected, mode::sniff),
             required("-i", "--interface").doc("Interface name to sniff packets on") & value("interface_name", interface_name),
             required("-p", "--port").doc("Port on which memcached instance is listening") & value("port", port),
-            required("-f", "--filter").doc("Filter memcached packets based on {keys, errors, ttls, commands}") & value("filter", action),
+            required("-f", "--filter").doc("Filter memcached packets based on {keys, errors, ttls, commands}") & value("filter", filter),
             option("-s", "--stats").doc("Display stats every x packets instead of streaming") & value("number_of_packets", nb_msg)
             );
 
@@ -193,7 +197,13 @@ int main(int argc, char *argv[])
 
     if(parse(argc, argv, cli)) {
         switch(selected) {
-            case mode::sniff: /* ... */ break;
+            case mode::sniff:
+                if(callbacks.count(filter) <= 0) {
+                    logger->error("Requested filter {} does not exist", filter);
+                    return EXIT_FAILURE;
+                }
+            break;
+
             case mode::forward: /* ... */ break;
             case mode::help: std::cout << make_man_page(cli, "memcache_sniffer"); break;
         }
@@ -202,42 +212,16 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    if(callbacks.count(action) <= 0) {
-        logger->error("Requested filter {} does not exist", action);
-        return EXIT_FAILURE;
-    }
 
-    std::array<char, PCAP_ERRBUF_SIZE> pcap_err{};
-    bpf_u_int32 network_mask = 0;
-    bpf_u_int32 network_ip = 0;
-
-    /* Find the properties for the device */
-    if (pcap_lookupnet(interface_name.c_str(), &network_ip, &network_mask, pcap_err.data()) == -1) {
-        logger->error("Couldn't get netmask for device {} -- {}", interface_name, pcap_err.data());
-        return EXIT_FAILURE;
-    }
-
-    /* Open the session */
-    pcap_t* handle = pcap_open_live(interface_name.c_str(), 0, 0, 1000, pcap_err.data());
-    if (handle == NULL) {
-        logger->error("Couldn't open device {} -- {}", interface_name.c_str(), pcap_err.data());
-        return EXIT_FAILURE;
-    }
-
-    /* PCAP filter that will be compiled to an eBPF filter */
-    struct bpf_program fp{};
+    // Filter only packets directed toward a specific port and that has an TCP payload
     std::string pcap_filter = fmt::format("port {} and (((ip[2:2] - ((ip[0] & 0x0f) << 2)) - ((tcp[12] & 0xf0 ) >> 2)) > 0)", port);
-    if (pcap_compile(handle, &fp, pcap_filter.c_str(), 0, network_ip) == -1) {
-        logger->error("Couldn't parse filter {} -- {}", pcap_filter, pcap_geterr(handle));
-        return EXIT_FAILURE;
-    }
-
-    if (pcap_setfilter(handle, &fp) == -1) {
-        logger->error("Couldn't install filter {} -- {}", pcap_filter, pcap_geterr(handle));
-        return EXIT_FAILURE;
-    }
-
+    std::optional<pcap_t*> handleOpt = pcap_utils::start_live_capture(interface_name, port, pcap_filter);
 //    pcap_t* handle = pcap_open_offline("dump.pcap", pcap_err.data());
+
+    if(!handleOpt) return EXIT_FAILURE;
+
+    pcap_t* handle = *handleOpt;
+
 
     if(nb_msg > 0) {
         on_data = [](std::string_view data) {
@@ -251,7 +235,7 @@ int main(int argc, char *argv[])
 
     std::array<int, 200> sockets{};
     for(int i = 0; i < sockets.size();) {
-        if(const auto sock = cnx::connect_to("192.168.18.18", 11221); sock.has_value()) {
+        if(const auto sock = cnx::connect_to("localhost", 11221); sock.has_value()) {
             sockets[i] = sock.value();
             i++;
         }
@@ -314,7 +298,7 @@ int main(int argc, char *argv[])
         }
     };
 
-    pcap_loop(handle, nb_msg, callbacks[action], nullptr);
+    pcap_loop(handle, nb_msg, callbacks[filter], nullptr);
     for(const auto& kv: counters) {
         std::cout << kv.first << " : " << kv.second << '\n';
     }

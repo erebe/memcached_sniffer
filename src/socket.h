@@ -9,6 +9,7 @@
 #include <resolv.h>
 #include <errno.h>
 #include <netinet/tcp.h>
+#include<netdb.h> //hostent
 
 #include <spdlog/spdlog.h>
 
@@ -18,12 +19,35 @@ static auto logger = spdlog::stdout_color_mt("sockets");
 
 std::optional<int> connect_to(std::string_view host, int port) {
 
-    // Create the socket
-    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_fd < 0) {
-        logger->error("Cannot create a TCP socket for {} -- {}", host, strerror(errno));
+    // Fill information regarding destination and connect
+    addrinfo hints{}, *infoptr;
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if(int ret = getaddrinfo(host.data(), fmt::format("{}", port).c_str(), &hints, &infoptr); ret != 0) {
+        logger->error("Cannot resolve hostname {} -- {}", host, gai_strerror(ret));
         return std::nullopt;
     }
+
+    int sock_fd = -1;
+    for (addrinfo* p = infoptr; p != nullptr; p = p->ai_next) {
+        sock_fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sock_fd < 0) continue;
+
+        if(connect(sock_fd, p->ai_addr, p->ai_addrlen) < 0) {
+            close(sock_fd);
+            sock_fd = -1;
+            continue;
+        }
+
+        break;
+    }
+
+    if(sock_fd < 0) {
+        logger->error("Impossible to connect to {}:{} -- {}", host, port, strerror(errno));
+        return std::nullopt;
+    }
+
+    logger->info("Connected to {}:{}", host, port);
 
     //Disable Nagle algorithm
     int nodelay = 1;
@@ -41,19 +65,6 @@ std::optional<int> connect_to(std::string_view host, int port) {
         return std::nullopt;
     }
 
-    // Fill information regarding destination and connect
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(sockaddr_in));
-    serv_addr.sin_port = htons(port);
-    serv_addr.sin_family = AF_INET;
-    inet_aton(host.data(), &serv_addr.sin_addr);
-    if(connect(sock_fd, (sockaddr*) &serv_addr, sizeof(serv_addr)) < 0) {
-        logger->error("Cannot open remote connection to {}:{} -- {}", host, port, strerror(errno));
-        return std::nullopt;
-    } else {
-        logger->info("Connected to {}:{}", host, port);
-    }
-
     // Set the socket in non blocking mode
     int flags = fcntl(sock_fd, F_GETFL, 0);
     flags = fcntl(sock_fd, F_SETFL, flags | O_NONBLOCK);
@@ -68,6 +79,8 @@ std::optional<int> connect_to(std::string_view host, int port) {
 
     return {sock_fd};
 }
+
+
 
 
 }
