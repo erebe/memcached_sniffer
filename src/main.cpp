@@ -40,14 +40,14 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
         // Calculate the size of the memcached request and the packet size in order
         // to check if the payload fit in a single packet or if we should buffer things
         // until we get everything
-        uint32_t len = ntohl(request->body_length);
-        uint8_t* last = ((uint8_t*) (request + 1)) + len;
-        uint8_t* packet_last = (uint8_t*) packet + header->len;
+        const uint32_t len = ntohl(request->body_length);
+        const uint8_t* last = ((uint8_t*) (request + 1)) + len;
+        const uint8_t* packet_last = (uint8_t*) packet + header->len;
         if(last <= packet_last) {
             // Happy path, the request is small enough to fit in a single packet
             logger->debug("Request fit in one packet");
             buffer.reserve(sizeof(memcached::header_t) + len);
-            buffer.insert(buffer.end(), (uint8_t*) request, last);
+            buffer.insert(buffer.end(), (const uint8_t*) request, last);
             on_msg(buffer);
             buffer.clear();
             return;
@@ -56,7 +56,7 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
         // The memcached body does not fit in a single packet, buffer things
         logger->debug("Request too big for one packet");
         buffer.reserve(sizeof(memcached::header_t) + len);
-        buffer.insert(buffer.end(), (uint8_t*) request, packet_last);
+        buffer.insert(buffer.end(), (const uint8_t*) request, packet_last);
         return;
 
     }
@@ -283,8 +283,7 @@ int sniff_memcached_traffic(const std::string& interface_name, int port, const p
     return EXIT_SUCCESS;
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]){
     using namespace clipp;
 
     enum class mode {sniff, forward, help};
