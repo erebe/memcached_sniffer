@@ -3,13 +3,13 @@
 #include <string>
 #include <string_view>
 #include <optional>
+#include <cerrno>
 
 #include <sys/socket.h>
 #include <arpa/inet.h> //inet_addr
 #include <resolv.h>
-#include <errno.h>
 #include <netinet/tcp.h>
-#include<netdb.h> //hostent
+#include <netdb.h> //hostent
 
 #include <spdlog/spdlog.h>
 

@@ -3,8 +3,8 @@
 #include <pcap.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <arpa/inet.h> //inet_addr
-#include <resolv.h>
+#include <cerrno>
+#include <poll.h>
 
 #include <clipp.h>
 #include <spdlog/spdlog.h>
@@ -45,7 +45,36 @@ void filter_requests(u_char* /*args*/, const struct pcap_pkthdr* header, const u
         const auto* request = (memcached::header_t*)(it);
         if(memcached::is_valid_header(request)) {
             // We are interested only by STORE requests
-            if(!(request->magic == memcached::MSG_TYPE::Request && request->opcode == memcached::COMMAND::Set)) {
+            if(request->magic != memcached::MSG_TYPE::Request &&
+               !(request->opcode == memcached::COMMAND::Set
+                 || request->opcode == memcached::COMMAND::Add
+                 || request->opcode == memcached::COMMAND::AddQ
+                 || request->opcode == memcached::COMMAND::Append
+                 || request->opcode == memcached::COMMAND::AppendQ
+                 || request->opcode == memcached::COMMAND::RAppend
+                 || request->opcode == memcached::COMMAND::RAppendQ
+                 || request->opcode == memcached::COMMAND::Decrement
+                 || request->opcode == memcached::COMMAND::DecrementQ
+                 || request->opcode == memcached::COMMAND::RDecr
+                 || request->opcode == memcached::COMMAND::RDecrQ
+                 || request->opcode == memcached::COMMAND::Delete
+                 || request->opcode == memcached::COMMAND::DeleteQ
+                 || request->opcode == memcached::COMMAND::RDelete
+                 || request->opcode == memcached::COMMAND::RDeleteQ
+                 || request->opcode == memcached::COMMAND::Increment
+                 || request->opcode == memcached::COMMAND::IncrementQ
+                 || request->opcode == memcached::COMMAND::RIncr
+                 || request->opcode == memcached::COMMAND::RIncrQ
+                 || request->opcode == memcached::COMMAND::Prepend
+                 || request->opcode == memcached::COMMAND::PrependQ
+                 || request->opcode == memcached::COMMAND::RPrepend
+                 || request->opcode == memcached::COMMAND::RPrependQ
+                 || request->opcode == memcached::COMMAND::RSet
+                 || request->opcode == memcached::COMMAND::RSetQ
+                 || request->opcode == memcached::COMMAND::Replace
+                 || request->opcode == memcached::COMMAND::ReplaceQ
+                 || request->opcode == memcached::COMMAND::Touch
+               )) {
                 return;
             }
 
@@ -245,12 +274,12 @@ int forward_memcached_traffic(const std::string& interface_name, int port, size_
     if(!handleOpt) return EXIT_FAILURE;
     pcap_t* handle = *handleOpt;
 
-    std::array<uint8_t*, BUFSIZ> buf{};
     size_t ix = 0;
-    nb_failure = 0;
-    on_msg = [&sockets, &ix, &buf, &create_new_connection, &nb_failure](const uint8_t* data, ssize_t len) {
+    on_msg = [&sockets, &ix, &create_new_connection](const uint8_t* data, size_t len) {
         ssize_t send_ret = 0;
-        ssize_t offset = 0;
+        size_t offset = 0;
+        int nb_failure = 0;
+        pollfd fds[1];
 
         for(;;) {
             send_ret = send(sockets[ix], data + offset, len - offset, MSG_NOSIGNAL);
@@ -272,6 +301,19 @@ int forward_memcached_traffic(const std::string& interface_name, int port, size_
                     }
 
                     // Pending data to be send, we have to wait ...
+                    fds[0].fd = sockets[ix];
+                    fds[0].events = POLLOUT;
+                    send_ret = poll(fds, 1, 500);
+
+                    if(send_ret == 0) {
+                        logger->error("timeout during send on socket {} {}/{}", sockets[ix], offset, len);
+                        goto reconnect;
+                    }
+
+                    if(send_ret < 0) {
+                        logger->error("error during send on socket {} {}/{} -- {}", sockets[ix], offset, len, strerror(errno));
+                        goto reconnect;
+                    }
                     break;
 
 
@@ -296,9 +338,11 @@ int forward_memcached_traffic(const std::string& interface_name, int port, size_
                 case -2:
                 reconnect:
                     close(sockets[ix]);
+                    offset = 0;
                     for(; nb_failure <= max_failure; nb_failure++) {
                         if(const auto sock = create_new_connection(); sock.has_value()) {
                             sockets[ix] = sock.value();
+                            nb_failure = 0;
                             break;
                         }
                     }
