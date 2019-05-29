@@ -1,13 +1,11 @@
-FROM alpine:3.6 as builder
+FROM alpine:3.9 as builder
 MAINTAINER github@erebe.eu
 
 ARG program_name=memcache_sniffer
 
 RUN apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/v3.6/community \
-      git curl musl-dev alpine-sdk cmake libpcap-dev
+      git curl musl-dev alpine-sdk cmake libpcap-dev clang
 RUN apk add upx --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/community
-RUN apk add 'libc++-dev>3.0.0-r0' --no-cache --repository http://dl-3.alpinelinux.org/alpine/edge/testing
-RUN apk add 'clang>5.0.0-r0' --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/main
 
 
 COPY . /mnt
