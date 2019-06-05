@@ -1,4 +1,5 @@
 #include <iostream>
+#include <chrono>
 #include <string>
 #include <pcap.h>
 #include <netinet/in.h>
@@ -208,6 +209,23 @@ void filter_errors(u_char* /*args*/, const struct pcap_pkthdr* header, const u_c
     }
 }
 
+void filter_opaque(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
+
+    // Drop invalid packets
+    if(packet == nullptr || header->caplen < sizeof(memcached::header_t)) return;
+
+    const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
+
+    // Only requests that Get commands
+    if(!memcached::is_valid_header(request) || request->opcode != memcached::COMMAND::Get) return;
+
+
+    on_data(fmt::format("{} {} {}",
+          request->opaque,
+          request->magic == memcached::MSG_TYPE::Request ? '0' : '1',
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()));
+}
+
 void filter_commands(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
@@ -238,7 +256,7 @@ void filter_ttls(u_char* /*args*/, const struct pcap_pkthdr* header, const u_cha
         case memcached::COMMAND::Set:
         case memcached::COMMAND::Add:
         case memcached::COMMAND::Replace:
-            on_data(fmt::format("{}", ntohl(memcached::get_extra<memcached::MSG_TYPE::Request, memcached::COMMAND::Set>(request)->expiration)));
+            on_data(fmt::format("{}", ::ntohl(memcached::get_extra<memcached::MSG_TYPE::Request, memcached::COMMAND::Set>(request)->expiration)));
             break;
 
         default:
@@ -411,6 +429,7 @@ int main(int argc, char *argv[]){
                                                    { "error", filter_errors },
                                                    { "command", filter_commands },
                                                    { "ttl", filter_ttls },
+                                                   { "opaque", filter_opaque },
                                                   };
 
     const auto sniffMode = (
