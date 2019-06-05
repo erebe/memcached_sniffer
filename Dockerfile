@@ -3,7 +3,7 @@ MAINTAINER github@erebe.eu
 
 ARG program_name=memcache_sniffer
 
-RUN apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/v3.6/community \
+RUN apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/v3.9/community \
       git curl musl-dev alpine-sdk cmake libpcap-dev clang
 RUN apk add upx --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/community
 
