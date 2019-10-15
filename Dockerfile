@@ -5,9 +5,6 @@ ARG program_name=memcache_sniffer
 
 RUN apk add --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/v3.9/community \
       git curl musl-dev alpine-sdk cmake libpcap-dev clang
-RUN apk add upx --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/community
-
-
 COPY . /mnt
 
 WORKDIR /mnt
@@ -19,7 +16,6 @@ RUN cmake ../ -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_BUILD_TYPE=Release -DBUILD_STATIC_BINARY=ON
 RUN touch ../CMakeLists.txt ; make -j VERBOSE=1
 RUN strip --strip-unneeded -s -R .comment -R .gnu.version $program_name
-RUN upx --ultra-brute $program_name
 
 
 FROM alpine:latest as runner

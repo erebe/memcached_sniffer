@@ -209,7 +209,7 @@ void filter_errors(u_char* /*args*/, const struct pcap_pkthdr* header, const u_c
     }
 }
 
-void filter_opaque(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
+void filter_latencies(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
     if(packet == nullptr || header->caplen < sizeof(memcached::header_t)) return;
@@ -220,10 +220,21 @@ void filter_opaque(u_char* /*args*/, const struct pcap_pkthdr* header, const u_c
     if(!memcached::is_valid_header(request) || request->opcode != memcached::COMMAND::Get) return;
 
 
-    on_data(fmt::format("{} {} {}",
-          request->opaque,
-          request->magic == memcached::MSG_TYPE::Request ? '0' : '1',
-          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()));
+    static std::unordered_map<uint32_t, long> requests_durations(20000000);
+    switch(request->magic) {
+        case memcached::MSG_TYPE::Request:
+            requests_durations[request->opaque] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            break;
+
+        case memcached::MSG_TYPE::Response:
+            auto it = requests_durations.find(request->opaque);
+            if (it != std::end(requests_durations)) {
+                long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                on_data(fmt::format("{}", now - it->second));
+                requests_durations.erase(request->opaque);
+            }
+            break;
+    }
 }
 
 void filter_commands(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
@@ -429,7 +440,7 @@ int main(int argc, char *argv[]){
                                                    { "error", filter_errors },
                                                    { "command", filter_commands },
                                                    { "ttl", filter_ttls },
-                                                   { "opaque", filter_opaque },
+                                                   { "latencies", filter_latencies },
                                                   };
 
     const auto sniffMode = (
