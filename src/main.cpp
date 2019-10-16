@@ -16,10 +16,15 @@
 #include "memcached_protocol.h"
 #include "socket.h"
 
+#include "prometheus/exposer.h"
+#include "prometheus/registry.h"
+#include "prometheus/histogram.h"
+
 static auto logger = spdlog::stdout_color_mt("main");
 
 static std::map<uint64_t, std::vector<uint8_t>> buffers{};
 static std::function<void(std::string_view)> on_data;
+static std::function<void(double)> on_data2;
 static std::function<void(const uint8_t*, ssize_t len)> on_msg;
 
 
@@ -237,6 +242,35 @@ void filter_latencies(u_char* /*args*/, const struct pcap_pkthdr* header, const 
     }
 }
 
+
+void filter_latencies_exporter(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
+
+    // Drop invalid packets
+    if(packet == nullptr || header->caplen < sizeof(memcached::header_t)) return;
+
+    const auto request = protocols::get_tcp_payload_as<memcached::header_t>(packet);
+
+    // Only requests that Get commands
+    if(!memcached::is_valid_header(request) || request->opcode != memcached::COMMAND::Get) return;
+
+
+    static std::unordered_map<uint32_t, long> requests_durations(1000000); // 1 million baby
+    switch(request->magic) {
+        case memcached::MSG_TYPE::Request:
+            requests_durations[request->opaque] = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            break;
+
+        case memcached::MSG_TYPE::Response:
+            auto it = requests_durations.find(request->opaque);
+            if (it != std::end(requests_durations)) {
+                long now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                on_data2(now - it->second);
+                requests_durations.erase(request->opaque);
+            }
+            break;
+    }
+}
+
 void filter_commands(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
     // Drop invalid packets
@@ -419,10 +453,41 @@ int sniff_memcached_traffic(const std::string& interface_name, int port, const p
     return EXIT_SUCCESS;
 }
 
+int exporter_memcached_traffic(const std::string& interface_name, int port, const pcap_handler& handler, int listenPort) {
+
+    logger->info("Starting prometheus endpoint on", listenPort);
+    prometheus::Exposer exposer{fmt::format("0.0.0.0:{}", listenPort)};
+    auto registry = std::make_shared<prometheus::Registry>();
+    exposer.RegisterCollectable(registry);
+    auto& latencies_family = prometheus::BuildHistogram()
+            .Name("latencies")
+            .Help("Additional description.")
+            .Register(*registry);
+
+
+    auto& latencies = latencies_family.Add({}, prometheus::Histogram::BucketBoundaries{0,1,5,10,20,30,40,50,60,70,80,90,100,150,200,300,500});
+    on_data2 = [&latencies](double value) { latencies.Observe(value); };
+
+
+    // Filter only packets directed toward a specific port and that has an TCP payload
+    std::string pcap_filter = fmt::format("port {} and (((ip[2:2] - ((ip[0] & 0x0f) << 2)) - ((tcp[12] & 0xf0 ) >> 2)) > 0)", port);
+    std::optional<pcap_t*> handleOpt = pcap_utils::start_live_capture(interface_name, port, pcap_filter);
+    if(!handleOpt) return EXIT_FAILURE;
+
+    pcap_t* handle = *handleOpt;
+
+    pcap_loop(handle, 0, handler, nullptr);
+
+    /* And close the session */
+    pcap_close(handle);
+
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char *argv[]){
     using namespace clipp;
 
-    enum class mode {sniff, forward, help};
+    enum class mode {sniff, forward, exporter, help};
     mode selected = mode::help;
     bool verbose = false;
 
@@ -432,7 +497,7 @@ int main(int argc, char *argv[]){
     size_t len;
 
     std::string interface_name;
-    int port;
+    int port, listenPort;
     std::string filter;
     int nb_msg = 0;
     std::string destination;
@@ -461,7 +526,15 @@ int main(int argc, char *argv[]){
             option("-v", "--verbose").doc("verbose mode").set(verbose)
             );
 
-    const auto cli = (sniffMode | forward | command("help").set(selected, mode::help));
+    const auto exporter = (
+            command("exporter").set(selected, mode::exporter),
+                    required("-i", "--interface").doc("interface name to sniff packets on") & value("interface_name", interface_name),
+                    required("-p", "--port").doc("port on which memcached instance is listening") & value("port", port),
+                    required("-l", "--listen").doc("port on which prometheus endpoint is listening on") & value("listen", listenPort),
+                    option("-v", "--verbose").doc("verbose mode").set(verbose)
+    );
+
+    const auto cli = (sniffMode | forward | exporter | command("help").set(selected, mode::help));
 
     if(!parse(argc, argv, cli)) {
         std::cout << make_man_page(cli, "memcache_sniffer");
@@ -496,6 +569,9 @@ int main(int argc, char *argv[]){
         case mode::help:
             std::cout << make_man_page(cli, "memcache_sniffer");
             return EXIT_SUCCESS;
+
+        case mode::exporter:
+            return exporter_memcached_traffic(interface_name, port, filter_latencies_exporter, listenPort);
     }
 
 }

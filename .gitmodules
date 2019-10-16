@@ -11,3 +11,6 @@
 	path = deps/clipp
 	url = https://github.com/muellan/clipp.git
 
+[submodule "deps/prometheus-cpp"]
+	path = deps/prometheus-cpp
+	url = git@github.com:jupp0r/prometheus-cpp.git

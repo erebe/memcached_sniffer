@@ -21,9 +21,18 @@ target_include_directories(memcache_sniffer PUBLIC
         deps/better-enums/
         deps/clipp/include
         deps/spdlog/include/
+        deps/prometheus-cpp/_build/deploy/usr/local/include/
         )
 
+target_link_directories(memcache_sniffer PUBLIC
+        deps/prometheus-cpp/_build/deploy/usr/local/lib/
+        deps/prometheus-cpp/_build/deploy/usr/local/lib64/
+        )
 
 target_link_libraries(memcache_sniffer pthread)
 target_link_libraries(memcache_sniffer fmt::fmt-header-only)
 target_link_libraries(memcache_sniffer pcap)
+target_link_libraries(memcache_sniffer prometheus-cpp-core)
+target_link_libraries(memcache_sniffer prometheus-cpp-pull)
+target_link_libraries(memcache_sniffer prometheus-cpp-core)
+target_link_libraries(memcache_sniffer z)
