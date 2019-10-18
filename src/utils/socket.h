@@ -6,12 +6,11 @@
 #include <cerrno>
 
 #include <sys/socket.h>
-#include <arpa/inet.h> //inet_addr
+#include <arpa/inet.h>
 #include <resolv.h>
 #include <netinet/tcp.h>
-#include <netdb.h> //hostent
+#include <netdb.h>
 
-#include <spdlog/spdlog.h>
 
 namespace cnx {
 
