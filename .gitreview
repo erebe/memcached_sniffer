@@ -1,5 +1,6 @@
 [gerrit]
-host=review.criteois.lan
+host=review.crto.in
 port=29418
 project=nosql/memcached-sniffer
 defaultbranch=master
+defaultremote=origin
