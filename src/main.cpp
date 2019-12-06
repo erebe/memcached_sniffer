@@ -34,6 +34,7 @@ int main(int argc, char *argv[]){
     std::string filter;
     int nb_msg = 0;
     std::string destination;
+    std::string clusterName;
     std::map<std::string, pcap_handler> callbacks{ { "key",       sniffer::filter_keys },
                                                    { "error",     sniffer::filter_errors },
                                                    { "command",   sniffer::filter_commands },
@@ -64,6 +65,7 @@ int main(int argc, char *argv[]){
                     required("-i", "--interface").doc("interface name to sniff packets on") & value("interface_name", interface_name),
                     required("-p", "--port").doc("port on which memcached instance is listening") & value("port", port),
                     required("-l", "--listen").doc("port on which prometheus endpoint is listening on") & value("listen", listenPort),
+                    required("-c", "--clustername").doc("name of the cluster where this node belong") & value("cluster_name", clusterName),
                     option("-v", "--verbose").doc("verbose mode").set(verbose)
     );
 
@@ -105,7 +107,7 @@ int main(int argc, char *argv[]){
 
         case mode::exporter:
             return exporter::exporter_memcached_latencies(interface_name, port, exporter::filter_latencies_system_clock,
-                                                          listenPort);
+                                                          listenPort, clusterName);
     }
 
 }

@@ -76,7 +76,7 @@ namespace exporter {
     }
 
 
-    int exporter_memcached_latencies(const std::string& interface_name, int port, const pcap_handler& handler, int listenPort) {
+    int exporter_memcached_latencies(const std::string& interface_name, int port, const pcap_handler& handler, int listenPort, const std::string& clusterName) {
 
         logger->info("Starting prometheus endpoint on", listenPort);
         prometheus::Exposer exposer{fmt::format("0.0.0.0:{}", listenPort)};
@@ -85,6 +85,7 @@ namespace exporter {
         auto& latencies_family = prometheus::BuildHistogram()
                 .Name("memcached_latencies_ms")
                 .Help("Seen latencies in milliseconds")
+                .Labels({{ "cluster", clusterName }})
                 .Register(*registry);
 
 
