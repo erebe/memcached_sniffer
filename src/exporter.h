@@ -3,6 +3,7 @@
 #include <chrono>
 #include <unordered_map>
 #include <functional>
+#include <csignal>
 
 #include <prometheus/exposer.h>
 #include <prometheus/histogram.h>
@@ -16,6 +17,7 @@ namespace exporter {
 
     static std::function<void(double)> on_data_exporter;
     static const size_t INITIAL_ON_FLIGHT_REQUEST = 1000000; // 1 million baby
+    static pcap_t* handle = nullptr;
 
     void filter_latencies_system_clock(u_char* /*args*/, const struct pcap_pkthdr* header, const u_char* packet) {
 
@@ -78,7 +80,7 @@ namespace exporter {
 
     int exporter_memcached_latencies(const std::string& interface_name, int port, const pcap_handler& handler, int listenPort, const std::string& clusterName) {
 
-        logger->info("Starting prometheus endpoint on", listenPort);
+        logger->info("Starting prometheus endpoint on 0.0.0.0:{}", listenPort);
         prometheus::Exposer exposer{fmt::format("0.0.0.0:{}", listenPort)};
         auto registry = std::make_shared<prometheus::Registry>();
         exposer.RegisterCollectable(registry);
@@ -105,8 +107,15 @@ namespace exporter {
         std::optional<pcap_t*> handleOpt = pcap_utils::start_live_capture(interface_name, port, pcap_filter);
         if(!handleOpt) return EXIT_FAILURE;
 
-        pcap_t* handle = *handleOpt;
+        handle = *handleOpt;
 
+        // Register signal handler to exit properly
+        const auto stop_pcap_capture = [](int signal) { pcap_close(handle); };
+        std::signal(SIGINT, stop_pcap_capture);
+        std::signal(SIGTERM, stop_pcap_capture);
+        std::signal(SIGKILL, stop_pcap_capture);
+
+        // Start capturing packets
         pcap_loop(handle, 0, handler, nullptr);
 
         /* And close the session */
