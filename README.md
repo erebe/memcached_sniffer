@@ -9,6 +9,10 @@ It also offer the possibility to forward store commands to an other memcached in
 - docker run --rm -ti -v (pwd):/data memcache_sniffer cp memcache_sniffer /data
 - sudo setcap cap_net_raw,cap_net_admin=eip ./memcache_sniffer
 
+# How to start
+
+- docker run --rm --net=host --cap-add cap_net_admin -ti memcached_sniffer ./memcache_sniffer xxx
+
 # How to use
 
     SYNOPSIS

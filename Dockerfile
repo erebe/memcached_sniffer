@@ -32,9 +32,15 @@ MAINTAINER github@erebe.eu
 
 ARG program_name=memcache_sniffer
 
-WORKDIR /root
+RUN adduser -h /home/sniffer -D -g '' sniffer
+WORKDIR /home/sniffer
 COPY --from=builder /mnt/build/$program_name .
-RUN chmod +x ./$program_name
+
+RUN apk add --no-cache libcap ;\
+    chmod +x ./$program_name ;\
+    setcap cap_net_raw,cap_net_admin=eip ./$program_name
+
+USER sniffer
 
 CMD ["./memcache_sniffer"]
 
